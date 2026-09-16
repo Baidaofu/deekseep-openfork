@@ -63,6 +63,9 @@ public final class LocalApiStats {
             if (j > latencyMaxMs) {
                 latencyMaxMs = j;
             }
+            // Requests are recorded after the completion log line, so persist here too or the
+            // counters the settings panel reads would stay at zero.
+            persistLocked(snapshot());
         }
     }
 
@@ -205,6 +208,12 @@ public final class LocalApiStats {
                 sb.append('\n');
             }
             LocalApiConfig.writeAtomic(file, sb.toString().getBytes("UTF-8"));
+        } catch (Throwable th) {
+        }
+        // The status snapshot feeds the settings panel and the floating console; log() is
+        // the single choke point every request already goes through, so refresh it here.
+        try {
+            persistLocked(snapshot());
         } catch (Throwable th) {
         }
     }
