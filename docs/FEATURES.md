@@ -1,10 +1,19 @@
-# Source edition scope
+# Feature scope
 
-The 1.7.4 Fix source edition contains the chat, account/privacy, appearance,
-debugging, engineering, Agent, backup, notification, process-management,
-feature-flag, custom greeting, custom assistant avatar, whale animation, and
-compatibility implementations present in the public feature core.
+## In this repository
 
-The Local API and its public-tunnel/keepalive implementation are not part of
-this repository or source build. Release notes describe the complete packaged
-release separately.
+The full feature core inherited from upstream `v1.7.4-fix`: chat, account/privacy, appearance,
+debugging, engineering, Agent, backup, notification, process management, feature flags, custom
+greeting, custom assistant avatar, whale animation, and the compatibility layer.
+
+## Added by this fork
+
+The **Local API** is implemented here as buildable sources, rather than shipped as the closed,
+server-keyed payload used by the upstream Closed edition. See
+[LOCAL-API.md](LOCAL-API.md) for the endpoint list, configuration and known gaps, and
+[BUILDING-WINDOWS.md](BUILDING-WINDOWS.md) for the additional host-build support.
+
+## Not in this repository
+
+* The upstream Closed edition's encrypted payload and its activation service.
+* Any public-tunnel provisioning that depends on the upstream author's servers.

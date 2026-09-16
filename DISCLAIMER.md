@@ -1,5 +1,13 @@
 # Disclaimer and Project Notice
 
+## About this repository
+
+This repository (`deekseep-openfork`) is an independent fork of
+[lllucccian/Deekseep](https://github.com/lllucccian/Deekseep). It is maintained separately from
+the upstream project and is not endorsed by, supported by, or affiliated with it. It also adds
+an open implementation of the Local API and Windows host-build support; the original feature
+core, the upstream Closed edition and its release process belong to the upstream author.
+
 ## About the project
 
 Deekseep is an independent compatibility and enhancement project. It is not an
