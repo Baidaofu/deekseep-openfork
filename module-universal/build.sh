@@ -59,6 +59,7 @@ echo "[1/7] collect open-source core and Xposed adapter"
 find ../module/src/com/dsmod/probe -maxdepth 1 -name '*.java' \
   ! -name Main.java ! -name BuildInfo.java > "$OUT/sources.txt"
 find ../module/src/com/dsmod/relay -name '*.java' >> "$OUT/sources.txt"
+find ../module/src/com/dsmod/probe/localapi -name '*.java' >> "$OUT/sources.txt"
 find ../module-legacy/compat -name '*.java' >> "$OUT/sources.txt"
 find ../module-legacy/src/de -name '*.java' >> "$OUT/sources.txt"
 find "$OUT/generated-src" -name '*.java' >> "$OUT/sources.txt"

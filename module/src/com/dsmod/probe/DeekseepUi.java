@@ -1434,6 +1434,13 @@ public final class DeekseepUi {
                     @Override public void onClick(View v) { AgentSettingsUi.show(act); }
                 }));
 
+        card.addView(makeDivider(act, divColor));
+        card.addView(toolActionRow(act, "本地 API · 实验性",
+                "配置兼容接口、后台保活、密钥、监听地址和请求统计。",
+                textColor, subColor, new View.OnClickListener() {
+                    @Override public void onClick(View v) { LocalApiUi.show(act); }
+                }));
+
         filterCategoryRows(card, category);
 
         // Footer is appended after filtering so it remains present on every category page.

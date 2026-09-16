@@ -5,9 +5,9 @@ DeepSeek 进程中，提供可选的模块设置入口和兼容层。本项目�
 
 [English](README.md)
 
-> **Fork 说明。** 本仓库为 `deekseep-openfork`，是上游 1.7.4 Fix Open 源码版的
-> 构建向分支，只包含 Windows 宿主构建修复，模块行为未做改动。
-> 详见 [docs/BUILDING-WINDOWS.md](docs/BUILDING-WINDOWS.md)。
+> **Fork 说明。** 本仓库为 `deekseep-openfork`，在上游 1.7.4 Fix Open 源码版基础上：
+> (a) 补齐了**完全开源的本地 API**（[docs/LOCAL-API.md](docs/LOCAL-API.md)）；
+> (b) 修复了 Windows 宿主构建问题（[docs/BUILDING-WINDOWS.md](docs/BUILDING-WINDOWS.md)）。
 
 
 > 💬 **QQ 交流群：1106465300** — 欢迎进群反馈问题、交流使用心得！
@@ -53,6 +53,7 @@ DeepSeek 进程中，提供可选的模块设置入口和兼容层。本项目�
 
 - [源码构建说明](docs/BUILDING.md)
 - [在 Windows / Git Bash / MSYS2 上构建](docs/BUILDING-WINDOWS.md)
+- [本地 API（OpenAI / Anthropic 兼容接口）](docs/LOCAL-API.md)
 - [版本发布说明](https://github.com/lllucccian/Deekseep/releases)
 - [提交可复现问题](https://github.com/lllucccian/Deekseep/issues)
 

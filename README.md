@@ -7,9 +7,10 @@ DeepSeek.
 
 [简体中文](README_CN.md)
 
-> **Fork note.** This is `deekseep-openfork`, a build-focused fork of the upstream
-> 1.7.4 Fix Open source edition. It carries Windows host-build fixes only; the
-> module behaviour is unchanged. See [docs/BUILDING-WINDOWS.md](docs/BUILDING-WINDOWS.md).
+> **Fork note.** This is `deekseep-openfork`, a fork of the upstream 1.7.4 Fix Open source
+> edition. On top of the upstream sources it adds (a) a fully open **Local API** gateway
+> ([docs/LOCAL-API.md](docs/LOCAL-API.md)) and (b) Windows host-build fixes
+> ([docs/BUILDING-WINDOWS.md](docs/BUILDING-WINDOWS.md)).
 
 
 > 💬 **QQ Group: 1106465300** — Feedback and discussion welcome!
@@ -57,6 +58,7 @@ backup and disable the module if the host becomes unstable.
 
 - [Build from source](docs/BUILDING.md)
 - [Building on Windows / Git Bash / MSYS2](docs/BUILDING-WINDOWS.md)
+- [Local API (OpenAI / Anthropic compatible endpoint)](docs/LOCAL-API.md)
 - [Release notes](https://github.com/lllucccian/Deekseep/releases)
 - [Report a reproducible problem](https://github.com/lllucccian/Deekseep/issues)
 

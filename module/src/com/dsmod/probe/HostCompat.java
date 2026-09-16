@@ -13,7 +13,7 @@ import java.lang.reflect.Modifier;
  * Keeping the legacy path as an identity mapping is intentional: one module APK therefore works
  * with both host families.</p>
  */
-final class HostCompat {
+public final class HostCompat {
     private static volatile boolean initialized;
     private static volatile boolean v230;
     private static volatile boolean v234;
@@ -755,19 +755,19 @@ final class HostCompat {
     }
 
     /** Suspend endpoint used to create the hidden session owned by the local API. */
-    static String localApiSessionCreateMethod() {
+    public static String localApiSessionCreateMethod() {
         if (v234) return googlePlay ? "a" : "u";
         return method("i91", "a");
     }
 
     /** Suspend endpoint used to delete one hidden local-API session. */
-    static String localApiSessionDeleteMethod() {
+    public static String localApiSessionDeleteMethod() {
         if (v234) return googlePlay ? "c" : "w";
         return method("i91", "c");
     }
 
     /** Request data class accepted by {@link #localApiSessionDeleteMethod()}. */
-    static String localApiSessionDeleteRequestClass() {
+    public static String localApiSessionDeleteRequestClass() {
         if (v234) return googlePlay ? "of1" : "ud1";
         return name("jb1");
     }

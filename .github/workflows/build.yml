@@ -24,11 +24,44 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
+      # The runner image already ships an Android SDK with cmdline-tools. Do not use
+      # android-actions/setup-android: it still tries to install the long-removed "tools"
+      # package and sdkmanager exits 1 before anything is built.
+      - name: Locate Android SDK
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$SDK" ]; then
+            SDK="$(dirname "$(dirname "$(command -v sdkmanager)")")"
+          fi
+          if [ ! -d "$SDK" ]; then
+            echo "No Android SDK found on the runner" >&2
+            exit 1
+          fi
+          SDKMANAGER="$(ls -d "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$SDKMANAGER" ] && command -v sdkmanager >/dev/null 2>&1; then
+            SDKMANAGER="$(command -v sdkmanager)"
+          fi
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager not found under $SDK" >&2
+            exit 1
+          fi
+          {
+            echo "ANDROID_SDK_ROOT=$SDK"
+            echo "ANDROID_HOME=$SDK"
+            echo "SDKMANAGER=$SDKMANAGER"
+          } >> "$GITHUB_ENV"
+          echo "SDK=$SDK"
+          echo "SDKMANAGER=$SDKMANAGER"
 
       - name: Install Android platform and build tools
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+        run: |
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
+          echo "--- resolved tools"
+          ls -1 "$ANDROID_SDK_ROOT/build-tools/35.0.0" | grep -E '^(aapt2|d8|zipalign|apksigner)$'
+          echo "--- build prerequisites"
+          command -v zip
+          command -v strings
 
       - name: Prepare local debug signing key
         run: |

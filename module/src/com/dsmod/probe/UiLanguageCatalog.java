@@ -187,6 +187,9 @@ final class UiLanguageCatalog {
         add("设置 AI 心跳的默认触发间隔。",
                 "Set the default interval for AI heartbeats.");
         add("Agent · 实验性", "Agent · Experimental");
+        add("本地 API · 实验性", "Local API · Experimental");
+        add("配置兼容接口、后台保活、密钥、监听地址和请求统计。",
+                "Configure the compatible endpoints, background keep-alive, key, listen address and request statistics.");
         add("管理本地工具、权限模式以及 Root / Shizuku 后端。",
                 "Manage local tools, permission mode, and Root / Shizuku backends.");
         add("配置兼容接口、后台保活、密钥、监听地址和请求统计。",
