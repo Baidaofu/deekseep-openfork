@@ -46,7 +46,7 @@ if [[ ! -f "$JSON_CACHE" ]] || ! printf '%s  %s\n' "$JSON_SHA256" "$JSON_CACHE" 
 fi
 cp "$JSON_CACHE" "$JSON_JAR"
 
-javac -source 8 -target 8 -cp "$JSON_JAR:$ANDROID_JAR:$UNIVERSAL_CLASSES:build/classes" \
+javac -encoding UTF-8 -source 8 -target 8 -cp "$(android_cp_normalize "$JSON_JAR:$ANDROID_JAR:$UNIVERSAL_CLASSES:build/classes")" \
     -d "$OUT/classes" \
     tests/com/dsmod/probe/ChatEditorThinkingRegressionTest.java \
     tests/com/dsmod/probe/ChatEditorHistoryImageRegressionTest.java \
@@ -118,7 +118,7 @@ javac -source 8 -target 8 -cp "$JSON_JAR:$ANDROID_JAR:$UNIVERSAL_CLASSES:build/c
 # Current sources compiled by this run must precede the previous universal APK classes.
 # Otherwise Java loads a stale HostCompat/Main from module-universal/build/classes and the
 # compatibility regression tests validate yesterday's APK instead of the pending build.
-TEST_CP="$JSON_JAR:$ANDROID_JAR:$OUT/classes:$UNIVERSAL_CLASSES:build/classes"
+TEST_CP="$(android_cp_normalize "$JSON_JAR:$ANDROID_JAR:$OUT/classes:$UNIVERSAL_CLASSES:build/classes")"
 
 java -cp "$TEST_CP" \
     com.dsmod.probe.ChatEditorThinkingRegressionTest

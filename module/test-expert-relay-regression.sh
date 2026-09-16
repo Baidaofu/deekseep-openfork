@@ -6,7 +6,7 @@ OUT="build/expert-relay-test"
 rm -rf "$OUT"
 mkdir -p "$OUT/classes"
 
-javac -source 8 -target 8 -d "$OUT/classes" \
+javac -encoding UTF-8 -source 8 -target 8 -d "$OUT/classes" \
     src/com/dsmod/relay/ExpertRelayGate.java \
     tests/com/dsmod/relay/ExpertRelayGateRegressionTest.java
 

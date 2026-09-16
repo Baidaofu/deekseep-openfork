@@ -71,3 +71,21 @@ ZIPALIGN="${ZIPALIGN:-$(resolve_android_tool zipalign)}"
 APKSIGNER="${APKSIGNER:-$(resolve_android_tool apksigner)}"
 
 export SDK_ROOT ANDROID_JAR AAPT2 D8 ZIPALIGN APKSIGNER
+
+# Normalise a POSIX ":"-separated classpath for native Windows javac/java.
+# MSYS only rewrites argv path lists heuristically, so a mixed absolute/relative
+# classpath silently reaches the JDK unconverted. No-op on Linux/macOS.
+android_cp_normalize() {
+    local input="$1" out="" part conv
+    if [ -n "${MSYSTEM:-}" ] && command -v cygpath >/dev/null 2>&1; then
+        local IFS=':'
+        for part in $input; do
+            [ -z "$part" ] && continue
+            conv="$(cygpath -w "$part" 2>/dev/null || printf %s "$part")"
+            if [ -z "$out" ]; then out="$conv"; else out="$out;$conv"; fi
+        done
+        printf '%s\n' "$out"
+    else
+        printf '%s\n' "$input"
+    fi
+}

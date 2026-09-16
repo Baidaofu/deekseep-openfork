@@ -400,9 +400,11 @@ final class AgentRunStore {
                 writer = null;
                 output = null;
                 if (!temporary.renameTo(file)) {
-                    // Linux/Android normally atomically replaces the destination. Preserve the
-                    // previous valid ledger if an unusual filesystem refuses the rename.
-                    return;
+                    // Linux/Android normally atomically replaces the destination. Windows (and a
+                    // few FUSE/emulated filesystems) refuse to rename over an existing file, so
+                    // fall back to an explicit replace; the caller still holds the ledger in
+                    // memory and the next mutation retries persistence.
+                    if (!file.delete() || !temporary.renameTo(file)) return;
                 }
             } catch (Throwable ignored) {
                 // Delivery still proceeds from memory; the next mutation retries persistence.

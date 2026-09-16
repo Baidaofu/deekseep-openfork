@@ -34,15 +34,16 @@ find compat -name '*.java' >> "$OUT/sources.txt"
 find src/de -name '*.java' >> "$OUT/sources.txt"
 find "$OUT/generated-src" -name '*.java' >> "$OUT/sources.txt"
 
-if ! javac -source 8 -target 8 \
-    -cp "$ANDROID_JAR:$ANDROIDX_PATH_PARSER_JAR" \
+if ! javac -encoding UTF-8 -source 8 -target 8 \
+    -cp "$(android_cp_normalize "$ANDROID_JAR:$ANDROIDX_PATH_PARSER_JAR")" \
     -d "$OUT/classes" @"$OUT/sources.txt" 2> "$OUT/javac.err"; then
   cat "$OUT/javac.err"
   exit 1
 fi
-MODCLASSES=$(find "$OUT/classes/com/dsmod" -name '*.class')
-$D8 --min-api 24 --output "$OUT/dex" $MODCLASSES \
-  "$ANDROIDX_PATH_PARSER_JAR" --lib "$ANDROID_JAR"
+# D8 accepts an @argfile; keep argv short (Windows CreateProcess limit).
+find "$OUT/classes/com/dsmod" -name '*.class' > "$OUT/d8-inputs.txt"
+if command -v cygpath >/dev/null 2>&1; then cygpath -w "$ANDROIDX_PATH_PARSER_JAR" >> "$OUT/d8-inputs.txt"; else echo "$ANDROIDX_PATH_PARSER_JAR" >> "$OUT/d8-inputs.txt"; fi
+$D8 --min-api 24 --output "$OUT/dex" @"$OUT/d8-inputs.txt" --lib "$ANDROID_JAR"
 $AAPT2 compile --dir res -o "$OUT/res.zip"
 $AAPT2 link -o "$OUT/base.apk" -I "$ANDROID_JAR" \
   --manifest AndroidManifest.xml -R "$OUT/res.zip" --auto-add-overlay
