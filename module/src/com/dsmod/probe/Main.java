@@ -13589,12 +13589,19 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
             bf.setAccessible(true);
             Object i91 = bf.get(r92);
             Method delM = null;
-            for (Method m : allDeclaredMethods(i91.getClass())) {
-                if (m.getName().equals(HostCompat.method("i91", "c"))
-                        && m.getParameterTypes().length == 2) {
-                    delM = m;
-                    break;
+            // The shared table and the Local API's dedicated resolver disagree on this endpoint's
+            // name, so accept either.
+            String[] deleteNames = {HostCompat.localApiSessionDeleteMethod(),
+                    HostCompat.method("i91", "c")};
+            for (String wanted : deleteNames) {
+                if (wanted == null) continue;
+                for (Method m : i91.getClass().getDeclaredMethods()) {
+                    if (m.getName().equals(wanted) && m.getParameterTypes().length == 2) {
+                        delM = m;
+                        break;
+                    }
                 }
+                if (delM != null) break;
             }
             if (delM == null) { extLog("[RELAY] i91.c(delete) 未找到"); return false; }
             // The endpoint's own first parameter is the request class. The table entry for it has
@@ -13641,11 +13648,67 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
      * interface as its last parameter, so the call can be driven directly: resume a proxy
      * continuation into a latch and wait for it. No coroutines class name is involved.</p>
      */
+    /**
+     * Invokes a host suspend function from Java.
+     *
+     * <p>Kotlin's {@code runBlocking(CoroutineContext, Function2)} is preferred because it supplies
+     * a real continuation, which also covers a host that declares the continuation parameter as a
+     * class rather than an interface. Its holder class is renamed per R8 generation and the
+     * mainland and Google Play builds do not share a name for it, so when it cannot be resolved the
+     * call is driven directly instead: a suspend function carries its continuation as its last
+     * parameter, so a proxy continuation plus a latch is enough and no coroutines name is
+     * involved. The direct path requires that parameter to be an interface.</p>
+     */
     private Object driveSuspend(ClassLoader cl, final Method m, final Object target,
                                 final Object[] preArgs) throws Throwable {
-        final Class<?>[] types = m.getParameterTypes();
         m.setAccessible(true);
-        if (types.length == 0 || !types[types.length - 1].isInterface()) {
+        Method runBlocking = cachedRunBlocking;
+        if (runBlocking == null) {
+            try {
+                Class<?> n02 = HostCompat.load(cl, "n02");
+                Class<?> mb3 = HostCompat.load(cl, "mb3");
+                runBlocking = StructuralResolver.find(cl, new Class<?>[]{n02, mb3},
+                        StructuralResolver.staticReturningObject(), "runBlocking holder");
+                if (runBlocking != null) cachedRunBlocking = runBlocking;
+            } catch (Throwable t) {
+                extLog("[VP] runBlocking lookup failed: " + safeThrowableMessage(t));
+            }
+        }
+        if (runBlocking != null) {
+            return runBlockingSuspend(cl, runBlocking, m, target, preArgs);
+        }
+        return directSuspend(cl, m, target, preArgs);
+    }
+
+    private Object runBlockingSuspend(ClassLoader cl, Method runBlocking, final Method m,
+                                      final Object target, final Object[] preArgs) throws Throwable {
+        Class<?> n02 = HostCompat.load(cl, "n02");
+        Class<?> mb3 = HostCompat.load(cl, "mb3");
+        runBlocking.setAccessible(true);
+        final Object ctx = emptyContextProxy(cl, n02);
+        InvocationHandler blockH = new InvocationHandler() {
+            public Object invoke(Object proxy, Method mm, Object[] a) throws Throwable {
+                if (isObjectMethod(mm)) return objectMethod(proxy, mm, a);
+                Object cont = (a != null && a.length > 0) ? a[a.length - 1] : null;
+                Object[] args = new Object[preArgs.length + 1];
+                System.arraycopy(preArgs, 0, args, 0, preArgs.length);
+                args[preArgs.length] = cont;
+                try {
+                    return m.invoke(target, args);
+                } catch (java.lang.reflect.InvocationTargetException ite) {
+                    throw (ite.getCause() != null ? ite.getCause() : ite);
+                }
+            }
+        };
+        Object block = Proxy.newProxyInstance(cl, new Class<?>[]{mb3}, blockH);
+        return runBlocking.invoke(null, ctx, block);
+    }
+
+    /** Direct driver for a suspend function whose continuation parameter is an interface. */
+    private Object directSuspend(ClassLoader cl, final Method m, final Object target,
+                                 final Object[] preArgs) throws Throwable {
+        final Class<?>[] types = m.getParameterTypes();
+        if (types.length != preArgs.length + 1 || !types[types.length - 1].isInterface()) {
             Object[] plain = new Object[preArgs.length];
             System.arraycopy(preArgs, 0, plain, 0, preArgs.length);
             try {
@@ -13662,7 +13725,6 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
                     @Override public Object invoke(Object proxy, Method method, Object[] a) {
                         if (isObjectMethod(method)) return objectMethod(proxy, method, a);
                         if (method.getParameterTypes().length == 0) {
-                            // getContext() must yield a CoroutineContext, not null.
                             Class<?> rt = method.getReturnType();
                             return rt.isInterface() ? emptyContextProxy(cl, rt) : null;
                         }
