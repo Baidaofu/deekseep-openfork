@@ -11760,38 +11760,14 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
     }
 
     // 运行时(app 进程内)扫描自身 dex，按结构签名 (rs0,Long)->非void 找 transport 方法。build 无关。
+    /**
+     * Fallback for a host whose transport class was renamed: the transport is the single method
+     * that takes the request base type and a long, and returns the flow. Resolved structurally so
+     * no per-channel name is involved.
+     */
     private Method findTransportByStructure(ClassLoader cl, Class<?> rs0) {
-        try {
-            java.util.List<String> names = listDexClasses(cl);
-            int scanned = 0;
-            for (String nm : names) {
-                if (nm.indexOf('.') >= 0) continue;   // defpackage 混淆类无包名
-                if (nm.length() > 6) continue;         // 混淆名很短，跳过长名降负载
-                Class<?> c;
-                try { c = Class.forName(nm, false, cl); }  // false=不初始化，避免静态副作用
-                catch (Throwable t) { continue; }
-                scanned++;
-                try {
-                    for (Method m : c.getDeclaredMethods()) {
-                        Class<?>[] pt = m.getParameterTypes();
-                        if (pt.length == 2 && pt[0] == rs0 && pt[1] == Long.class
-                                && m.getReturnType() != void.class
-                                && !m.getReturnType().isPrimitive()) {
-                            log("[TX] found transport " + c.getName() + "." + m.getName()
-                                    + "(rs0,Long)->" + m.getReturnType().getName());
-                            return m;
-                        }
-                    }
-                } catch (Throwable t) {
-                    // Resolving one method signature can throw when it references a type the
-                    // runtime cannot load (android.view.RenderNode on some hosts). Skip that class
-                    // and keep scanning; aborting here is what made the scan fail on those hosts.
-                    continue;
-                }
-            }
-            log("[TX] scanned=" + scanned + "/" + names.size() + " no (rs0,Long) match");
-        } catch (Throwable t) { log("[TX] scan failed: " + t); }
-        return null;
+        return StructuralResolver.find(cl, new Class<?>[]{rs0, Long.class},
+                StructuralResolver.usableReturn(), "transport");
     }
 
     @SuppressWarnings("unchecked")
@@ -13604,20 +13580,10 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
         // build 间该 holder 类改名(2.2.1=t82 / 2.2.2=u82)，按候选名 + 结构签名兜底解析。
         Method K = cachedRunBlocking;
         if (K == null) {
-            String[] holders = HostCompat.isV230()
-                    ? new String[]{HostCompat.name("u82")}
-                    : new String[]{"u82", "t82", "v82", "s82", "w82"};
-            for (String nm : holders) {
-                try {
-                    Class<?> holder = cl.loadClass(nm);
-                    for (Method mm : holder.getDeclaredMethods()) {
-                        Class<?>[] p = mm.getParameterTypes();
-                        if (java.lang.reflect.Modifier.isStatic(mm.getModifiers())
-                                && p.length == 2 && p[0] == n02 && p[1] == mb3) { K = mm; break; }
-                    }
-                } catch (Throwable ignored) {}
-                if (K != null) { extLog("[VP] runBlocking=" + nm + ".K"); break; }
-            }
+            // Kotlin's runBlocking(CoroutineContext, Function2) lives in a holder class whose name
+            // changes per R8 generation, so resolve it by shape instead of by name.
+            K = StructuralResolver.find(cl, new Class<?>[]{n02, mb3},
+                    StructuralResolver.staticReturningObject(), "runBlocking holder");
             if (K != null) cachedRunBlocking = K;
         }
         if (K == null) { extLog("[VP] runBlocking(n02,mb3) not found"); return null; }

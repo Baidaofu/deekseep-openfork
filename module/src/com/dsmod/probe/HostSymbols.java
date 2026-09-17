@@ -81,6 +81,10 @@ final class HostSymbols {
      */
     private static final Object DEXKIT_LOCK = new Object();
     private static volatile Map<String, String> symbols = Collections.emptyMap();
+    /** Kept open after resolution so runtime lookups do not re-parse the dex. */
+    private static volatile DexKitBridge liveBridge;
+    private static volatile String[] liveBridgePaths;
+
     private static volatile boolean loaded;
     private static volatile boolean running;
 
@@ -142,6 +146,7 @@ final class HostSymbols {
                     + DexKitSupport.failureReason() + ")");
             return;
         }
+        synchronized (DEXKIT_LOCK) { closeLiveBridge(); }
         for (String apk : apkPaths) {
             if (apk == null || apk.length() == 0) continue;
             if (!new File(apk).isFile()) {
@@ -189,6 +194,7 @@ final class HostSymbols {
             }
             }
         }
+        synchronized (DEXKIT_LOCK) { ensureLiveBridge(null); }
     }
 
     /** Runs the probe when the marker file lists APK paths, one per line. */
@@ -225,17 +231,10 @@ final class HostSymbols {
         String[] paths = apkPaths;
         if (paths == null || paths.length == 0) return out;
 
-        DexKitBridge bridge = null;
         synchronized (DEXKIT_LOCK) {
+        DexKitBridge bridge = null;
         try {
-            for (String path : paths) {
-                if (path == null || path.length() == 0) continue;
-                DexKitBridge candidate = DexKitBridge.create(path);
-                if (candidate != null && candidate.isValid()) {
-                    bridge = candidate;
-                    break;
-                }
-            }
+            bridge = ensureLiveBridge(paths);
             if (bridge == null) return out;
 
             ClassDataList byShape = findByConstructorShape(bridge);
@@ -259,10 +258,9 @@ final class HostSymbols {
                     + " (anchor names the generated $$serializer, not the data class)");
         } catch (Throwable t) {
             Main.log("host symbols: resolve failed: " + Main.safeThrowableMessage(t));
-        } finally {
-            if (bridge != null) try { bridge.close(); } catch (Throwable ignored) {}
         }
         }
+        // The bridge stays open: runtime lookups (StructuralResolver) reuse it.
         return out;
     }
 
@@ -271,6 +269,63 @@ final class HostSymbols {
      * and no per-channel table is involved, which is what makes a new DeepSeek build resolvable
      * without shipping a module update.
      */
+    /**
+     * Structural method lookup used by {@link StructuralResolver}: the declaring class and method
+     * name of the first method whose parameter types match. Called under the DexKit lock.
+     */
+    static String[] findMethodByParams(String[] paramTypeNames) {
+        synchronized (DEXKIT_LOCK) {
+            DexKitBridge bridge = liveBridge;
+            if (bridge == null || paramTypeNames == null || paramTypeNames.length == 0) return null;
+            try {
+                MethodDataList list = bridge.findMethod(FindMethod.create().matcher(
+                        MethodMatcher.create()
+                                .paramCount(paramTypeNames.length)
+                                .paramTypes(paramTypeNames)));
+                if (list == null || list.isEmpty()) return null;
+                MethodData method = list.get(0);
+                if (method == null) return null;
+                return new String[]{method.getClassName(), method.getName()};
+            } catch (Throwable t) {
+                Main.log("[STRUCT] method query failed: " + Main.safeThrowableMessage(t));
+                return null;
+            }
+        }
+    }
+
+    private static DexKitBridge openBridge(String[] paths) {
+        if (paths == null) return null;
+        for (String path : paths) {
+            if (path == null || path.length() == 0) continue;
+            try {
+                DexKitBridge bridge = DexKitBridge.create(path);
+                if (bridge != null && bridge.isValid()) {
+                    liveBridgePaths = paths;
+                    return bridge;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    private static DexKitBridge ensureLiveBridge(String[] paths) {
+        DexKitBridge bridge = liveBridge;
+        if (bridge != null) return bridge;
+        bridge = openBridge(paths != null ? paths : liveBridgePaths);
+        liveBridge = bridge;
+        return bridge;
+    }
+
+    /** Closes the process-wide bridge; only the multi-APK probe needs this. */
+    private static void closeLiveBridge() {
+        DexKitBridge bridge = liveBridge;
+        liveBridge = null;
+        if (bridge != null) {
+            try { bridge.close(); } catch (Throwable ignored) {}
+        }
+    }
+
     private static ClassDataList findByConstructorShape(DexKitBridge bridge) {
         try {
             return bridge.findClass(FindClass.create().matcher(ClassMatcher.create().methods(
