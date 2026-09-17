@@ -13639,6 +13639,8 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
     }
 
     private volatile Method cachedRunBlocking;
+    /** CoroutineContext type the resolved runBlocking holder expects. */
+    private static volatile Class<?> cachedRunBlockingContext;
     /**
      * Invokes a host suspend function from Java without Kotlin's runBlocking.
      *
@@ -13648,6 +13650,59 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
      * interface as its last parameter, so the call can be driven directly: resume a proxy
      * continuation into a latch and wait for it. No coroutines class name is involved.</p>
      */
+    /**
+     * Candidate CoroutineContext types for a host continuation class.
+     *
+     * <p>A Kotlin continuation implements {@code Continuation}, whose {@code getContext()} returns
+     * the CoroutineContext. R8 renames every one of those, so instead of the symbol table's n02 the
+     * candidates are read off the host's own continuation: any no-argument method that returns an
+     * interface. runBlocking's first parameter is exactly one of them, and the structural query
+     * only matches when the parameter type is the one asked for, so a wrong candidate simply finds
+     * no holder.</p>
+     */
+    private static List<Class<?>> contextCandidates(Class<?> continuationType) {
+        ArrayList<Class<?>> out = new ArrayList<>();
+        if (continuationType == null) return out;
+        try {
+            for (Class<?> c = continuationType; c != null && c != Object.class; c = c.getSuperclass()) {
+                collectContextCandidates(c, out);
+            }
+            for (Class<?> itf : allInterfaces(continuationType)) collectContextCandidates(itf, out);
+        } catch (Throwable ignored) {}
+        return out;
+    }
+
+    private static void collectContextCandidates(Class<?> type, List<Class<?>> out) {
+        try {
+            for (Method m : type.getDeclaredMethods()) {
+                Class<?> rt = m.getReturnType();
+                if (m.getParameterTypes().length == 0 && rt.isInterface() && !out.contains(rt)) {
+                    out.add(rt);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /**
+     * Resolves Kotlin's {@code runBlocking(CoroutineContext, Function2)} holder from the host's own
+     * continuation instead of from the per-channel symbol table. Returns null when nothing matches.
+     */
+    private Method resolveRunBlockingHolder(ClassLoader cl, Class<?> continuationType) {
+        for (Class<?> contextType : contextCandidates(continuationType)) {
+            // The second parameter is left as a wildcard: Function2 is renamed too, and the
+            // (context, *, Object) shape is already specific enough.
+            Method holder = StructuralResolver.find(cl, new Class<?>[]{contextType, null},
+                    StructuralResolver.staticReturningObject(), "runBlocking holder");
+            if (holder != null) {
+                cachedRunBlocking = holder;
+                cachedRunBlockingContext = contextType;
+                return holder;
+            }
+        }
+        return null;
+    }
+
     /**
      * Invokes a host suspend function from Java.
      *
@@ -13674,16 +13729,32 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
                 extLog("[VP] runBlocking lookup failed: " + safeThrowableMessage(t));
             }
         }
+        Class<?> contextType = cachedRunBlockingContext;
+        if (runBlocking == null) {
+            // The table's CoroutineContext/Function2 names are per channel and wrong on Google
+            // Play; the host's own continuation knows the context type.
+            Class<?>[] params = m.getParameterTypes();
+            if (params.length > 0) {
+                runBlocking = resolveRunBlockingHolder(cl, params[params.length - 1]);
+                contextType = cachedRunBlockingContext;
+            }
+        }
         if (runBlocking != null) {
-            return runBlockingSuspend(cl, runBlocking, m, target, preArgs);
+            return runBlockingSuspend(cl, runBlocking, contextType, m, target, preArgs);
         }
         return directSuspend(cl, m, target, preArgs);
     }
 
-    private Object runBlockingSuspend(ClassLoader cl, Method runBlocking, final Method m,
-                                      final Object target, final Object[] preArgs) throws Throwable {
-        Class<?> n02 = HostCompat.load(cl, "n02");
+    private Object runBlockingSuspend(ClassLoader cl, Method runBlocking, Class<?> contextType,
+                                      final Method m, final Object target,
+                                      final Object[] preArgs) throws Throwable {
+        Class<?> n02 = contextType != null ? contextType : HostCompat.load(cl, "n02");
+        // The block type must be the holder's own second parameter: the table's Function2 name is
+        // per channel, and passing a proxy of the wrong type fails inside the holder with
+        // "argument 2 has type kj3, got $Proxy7".
         Class<?> mb3 = HostCompat.load(cl, "mb3");
+        Class<?>[] holderParams = runBlocking.getParameterTypes();
+        if (holderParams.length == 2 && holderParams[1].isInterface()) mb3 = holderParams[1];
         runBlocking.setAccessible(true);
         final Object ctx = emptyContextProxy(cl, n02);
         InvocationHandler blockH = new InvocationHandler() {
