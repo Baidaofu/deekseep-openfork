@@ -11731,7 +11731,9 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
         hook(m).intercept(new Hooker() {
             @Override public Object intercept(Chain chain) throws Throwable {
                 Object[] args = chain.getArgs().toArray();
-                try { if (liveR92 == null) liveR92 = chain.getThisObject(); } catch (Throwable ignored) {}
+                try { if (liveR92 == null) { liveR92 = chain.getThisObject();
+                    extLog("[API] transport captured via " + mDeclaration(chain)); } }
+                catch (Throwable ignored) {}
                 try {
                     Object req = args != null && args.length > 0 ? args[0] : null;
                     List fps = tlPendingFps.get();
@@ -12106,6 +12108,7 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
                 hook(ctor).intercept(new Hooker() {
                     @Override public Object intercept(Chain chain) throws Throwable {
                         Object result = chain.proceed();
+                        extLog("[API] pow manager hook");
                         captureApiManagers(chain.getThisObject());
                         return result;
                     }
@@ -12117,7 +12120,8 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
                 if ((nm.equals("j") || nm.equals("b")) && m.getParameterTypes().length == 1) {
                     hook(m).intercept(new Hooker() {
                         @Override public Object intercept(Chain chain) throws Throwable {
-                            captureApiManagers(chain.getThisObject());
+                            extLog("[API] pow manager hook");
+                        captureApiManagers(chain.getThisObject());
                             return chain.proceed();
                         }
                     });
@@ -12126,6 +12130,16 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
             }
             log("installed pow manager capture on q71 x" + n);
         } catch (Throwable t) { log("installPowManagerCapture failed: " + t); }
+    }
+
+    /** Names the hooked transport method for diagnostics. */
+    private static String mDeclaration(Chain chain) {
+        try {
+            java.lang.reflect.Method m = (java.lang.reflect.Method) chain.getExecutable();
+            return m.getDeclaringClass().getName() + "." + m.getName();
+        } catch (Throwable ignored) {
+            return "?";
+        }
     }
 
     private static void captureApiManagers(Object q71) {
