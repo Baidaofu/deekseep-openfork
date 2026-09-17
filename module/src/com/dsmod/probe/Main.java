@@ -13512,6 +13512,28 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
         return null;
     }
 
+    /** True when the type can carry a session id: a single-String constructor or a String field. */
+    private static boolean looksLikeDeleteRequest(Class<?> type) {
+        if (type == null || type.isPrimitive() || type.isArray()) return false;
+        try {
+            for (java.lang.reflect.Constructor<?> c : type.getDeclaredConstructors()) {
+                Class<?>[] p = c.getParameterTypes();
+                if (p.length == 1 && p[0] == String.class) return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            for (Class<?> c = type; c != null && c != Object.class; c = c.getSuperclass()) {
+                for (Field field : c.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
+                    if (field.getType() == String.class) return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
     /**
      * Builds the delete-session request. Prefers a single-String constructor and otherwise
      * allocates the object and fills its first String field, so a host whose request class lost its
@@ -13590,18 +13612,33 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
             Object i91 = bf.get(r92);
             Method delM = null;
             // The shared table and the Local API's dedicated resolver disagree on this endpoint's
-            // name, so accept either.
+            // name, so accept either, and only keep the hit when its request class actually looks
+            // like a delete request: on Google Play that name matches an unrelated two-parameter
+            // method whose parameter is a 114 KB utility class.
             String[] deleteNames = {HostCompat.localApiSessionDeleteMethod(),
                     HostCompat.method("i91", "c")};
             for (String wanted : deleteNames) {
                 if (wanted == null) continue;
-                for (Method m : i91.getClass().getDeclaredMethods()) {
-                    if (m.getName().equals(wanted) && m.getParameterTypes().length == 2) {
+                for (Method m : allDeclaredMethods(i91.getClass())) {
+                    Class<?>[] p = m.getParameterTypes();
+                    if (m.getName().equals(wanted) && p.length == 2
+                            && looksLikeDeleteRequest(p[0])) {
                         delM = m;
                         break;
                     }
                 }
                 if (delM != null) break;
+            }
+            if (delM == null) {
+                // Shape fallback: the delete endpoint is a suspend function whose request class
+                // holds the session id, so it has a single-String constructor or a String field.
+                for (Method m : allDeclaredMethods(i91.getClass())) {
+                    Class<?>[] p = m.getParameterTypes();
+                    if (p.length == 2 && looksLikeDeleteRequest(p[0])) {
+                        delM = m;
+                        break;
+                    }
+                }
             }
             if (delM == null) { extLog("[RELAY] i91.c(delete) 未找到"); return false; }
             // The endpoint's own first parameter is the request class. The table entry for it has
