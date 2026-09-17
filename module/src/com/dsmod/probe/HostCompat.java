@@ -399,7 +399,12 @@ public final class HostCompat {
                 case "ni5": return "bq5";
                 case "bi5": return "jp5";
                 case "ky7": return "oa8";
-                case "n81": return "mb1";
+                // Google Play completion PoW manager. Verified against the Play 2.3.6 dex:
+                // it is the class holding the transport (field f:Ljg2;) that declares
+                // b(Lf62;)Object and j(Lf62;)Serializable, exactly like mainland 2.3.6's ca1
+                // (b(Lj42;)Object / j(Lj42;)Serializable). The previous entry, mb1, is a 3 KB
+                // synthetic lambda class, so the PoW-manager hook never fired on Play.
+                case "n81": return "ub1";
                 case "zb2": return "ag2";
                 case "y41": return "x71";
                 // x71 is the 2.3.4 GP Flow wrapper; its collector is a83. za5 has the same
