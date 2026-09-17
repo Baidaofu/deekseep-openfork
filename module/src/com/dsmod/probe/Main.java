@@ -3,6 +3,7 @@ package com.dsmod.probe;
 import com.dsmod.relay.ExpertRelayGate;
 import com.dsmod.probe.localapi.ApiContract;
 import com.dsmod.probe.localapi.HostBackend;
+import com.dsmod.probe.localapi.LocalApiConfig;
 import com.dsmod.probe.localapi.LocalApi;
 
 import android.app.Activity;
@@ -12294,8 +12295,15 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
             }
             Object nativeRequest;
             try {
+                boolean thinking = request.reasoning;
+                if (!thinking) {
+                    try {
+                        thinking = LocalApiConfig.get().forceReasoning;
+                    } catch (Throwable ignored) {
+                    }
+                }
                 nativeRequest = newNativeCompletionRequest(cl, sessionId, composePrompt(request),
-                        request.fileIds, request.nativeModel, proof);
+                        request.fileIds, request.nativeModel, proof, thinking, request.search);
             } catch (Throwable t) {
                 throw new IOException("cannot build a native request: " + safeThrowableMessage(t));
             }
@@ -12348,7 +12356,8 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
      * constructor is used with default arguments and the known fields are set explicitly.
      */
     private static Object newNativeCompletionRequest(ClassLoader cl, String sid, String prompt,
-            List<String> fileIds, String nativeModel, Object proof) throws Throwable {
+            List<String> fileIds, String nativeModel, Object proof, boolean thinking,
+            boolean search) throws Throwable {
         Class<?> requestClass = resolveCompletionRequestClass(cl);
         Object template = liveRequestTemplate;
         Object request = null;
@@ -12361,8 +12370,13 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
         setFieldByName(request, "b", null);
         setFieldByName(request, "c", prompt);
         setFieldByName(request, "d", fileIds == null ? new ArrayList() : new ArrayList(fileIds));
-        setFieldByName(request, "e", Boolean.FALSE);
-        setFieldByName(request, "f", Boolean.FALSE);
+        // Field order matches the serialized names of ChatFullCompletionRequest:
+        // a=chat_session_id, b=parent_message_id, c=prompt, d=ref_file_ids,
+        // e=thinking_enabled, f=search_enabled, g=audio_id, h=preempt, i=model_type,
+        // j=action, k=proof of work. e was hard-coded to false, so deep reasoning could
+        // never be requested through the Local API.
+        setFieldByName(request, "e", Boolean.valueOf(thinking));
+        setFieldByName(request, "f", Boolean.valueOf(search));
         setFieldByName(request, "i", nativeModel == null ? ApiContract.MODEL_DEFAULT : nativeModel);
         setFieldByName(request, "k", proof);
         return request;
