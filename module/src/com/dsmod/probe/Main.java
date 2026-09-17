@@ -1179,7 +1179,15 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
         try {
             Method method = HostCompat.settingsEntryMethod(loader);
             if (method == null) {
+                // The native settings row is only mapped for known host generations. Without it a
+                // newer host had no entry point at all - the "floating fallback" was only a log
+                // message. showButton() is idempotent (it reuses an existing button and hides
+                // itself once the native row is in place), so retry it on every resume.
+                log("settings entry: native row unavailable, using the floating entry");
                 ADAPTED_SETTINGS_ENTRY_HOOKED.set(false);
+                main.post(new Runnable() {
+                    @Override public void run() { showButton(); }
+                });
                 return;
             }
             hook(method).intercept(new Hooker() {
