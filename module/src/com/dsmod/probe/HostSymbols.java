@@ -8,11 +8,14 @@ import android.os.SystemClock;
 import org.json.JSONObject;
 import org.luckypray.dexkit.DexKitBridge;
 import org.luckypray.dexkit.query.FindClass;
+import org.luckypray.dexkit.query.FindMethod;
 import org.luckypray.dexkit.query.matchers.ClassMatcher;
 import org.luckypray.dexkit.query.matchers.MethodMatcher;
 import org.luckypray.dexkit.query.matchers.MethodsMatcher;
 import org.luckypray.dexkit.result.ClassData;
 import org.luckypray.dexkit.result.ClassDataList;
+import org.luckypray.dexkit.result.MethodData;
+import org.luckypray.dexkit.result.MethodDataList;
 
 import java.io.BufferedReader;
 import java.io.File;

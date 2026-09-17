@@ -11768,14 +11768,22 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
                 try { c = Class.forName(nm, false, cl); }  // false=不初始化，避免静态副作用
                 catch (Throwable t) { continue; }
                 scanned++;
-                for (Method m : c.getDeclaredMethods()) {
-                    Class<?>[] pt = m.getParameterTypes();
-                    if (pt.length == 2 && pt[0] == rs0 && pt[1] == Long.class
-                            && m.getReturnType() != void.class && !m.getReturnType().isPrimitive()) {
-                        log("[TX] found transport " + c.getName() + "." + m.getName()
-                                + "(rs0,Long)->" + m.getReturnType().getName());
-                        return m;
+                try {
+                    for (Method m : c.getDeclaredMethods()) {
+                        Class<?>[] pt = m.getParameterTypes();
+                        if (pt.length == 2 && pt[0] == rs0 && pt[1] == Long.class
+                                && m.getReturnType() != void.class
+                                && !m.getReturnType().isPrimitive()) {
+                            log("[TX] found transport " + c.getName() + "." + m.getName()
+                                    + "(rs0,Long)->" + m.getReturnType().getName());
+                            return m;
+                        }
                     }
+                } catch (Throwable t) {
+                    // Resolving one method signature can throw when it references a type the
+                    // runtime cannot load (android.view.RenderNode on some hosts). Skip that class
+                    // and keep scanning; aborting here is what made the scan fail on those hosts.
+                    continue;
                 }
             }
             log("[TX] scanned=" + scanned + "/" + names.size() + " no (rs0,Long) match");
