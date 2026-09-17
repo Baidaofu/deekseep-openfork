@@ -243,6 +243,8 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
     private static volatile Object liveQ71;
     /** Most recent host completion request; cloned as the template for Local API turns. */
     private static volatile Object liveRequestTemplate;
+    /** Transport entry resolved structurally; its name differs per channel (b vs d). */
+    private static volatile Method liveTransportEntry;
     private static volatile Object liveFm8;
     private static volatile ClassLoader hostClassLoader;
     private static volatile Context hostApplicationContext;
@@ -11728,6 +11730,7 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
 
     // 给定 transport 方法(签名 (rs0,Long)->Flow) 装上中继包装 hook
     private void hookTransport(Method m) {
+        if (liveTransportEntry == null) liveTransportEntry = m;
         hook(m).intercept(new Hooker() {
             @Override public Object intercept(Chain chain) throws Throwable {
                 Object[] args = chain.getArgs().toArray();
@@ -12296,11 +12299,21 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
             } catch (Throwable t) {
                 throw new IOException("cannot build a native request: " + safeThrowableMessage(t));
             }
-            Method entry = null;
-            for (Method m : transport.getClass().getDeclaredMethods()) {
-                if ("b".equals(m.getName()) && m.getParameterTypes().length == 2) { entry = m; break; }
+            // Prefer the entry the structural scan resolved: the method name is per channel
+            // (the mainland build calls it b, the Play build d), the signature is not.
+            Method entry = liveTransportEntry;
+            if (entry != null && !entry.getDeclaringClass().isInstance(transport)) entry = null;
+            if (entry == null) {
+                for (Method m : transport.getClass().getDeclaredMethods()) {
+                    if ("b".equals(m.getName()) && m.getParameterTypes().length == 2) {
+                        entry = m;
+                        break;
+                    }
+                }
             }
             if (entry == null) throw new IOException("host completion entry point not found");
+            extLog("[API] completion entry " + entry.getDeclaringClass().getSimpleName()
+                    + "." + entry.getName());
             entry.setAccessible(true);
             Object flow = entry.invoke(transport, nativeRequest, null);
             if (flow == null) throw new IOException("host returned no completion stream");
@@ -13499,6 +13512,44 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
         return null;
     }
 
+    /**
+     * Builds the delete-session request. Prefers a single-String constructor and otherwise
+     * allocates the object and fills its first String field, so a host whose request class lost its
+     * constructor still gets its throwaway sessions cleaned up.
+     */
+    private static Object newSessionDeleteRequest(Class<?> type, String sid) {
+        if (type == null || sid == null) return null;
+        try {
+            for (java.lang.reflect.Constructor<?> c : type.getDeclaredConstructors()) {
+                Class<?>[] p = c.getParameterTypes();
+                if (p.length == 1 && p[0] == String.class) {
+                    c.setAccessible(true);
+                    return c.newInstance(sid);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            Class<?> unsafeCls = Class.forName("sun.misc.Unsafe");
+            Field theUnsafe = unsafeCls.getDeclaredField("theUnsafe");
+            theUnsafe.setAccessible(true);
+            Object unsafe = theUnsafe.get(null);
+            Object instance = unsafeCls.getMethod("allocateInstance", Class.class)
+                    .invoke(unsafe, type);
+            for (Class<?> c = type; c != null && c != Object.class; c = c.getSuperclass()) {
+                for (Field field : c.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
+                    if (field.getType() != String.class) continue;
+                    field.setAccessible(true);
+                    field.set(instance, sid);
+                    return instance;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
     private static String extractSessionId(Object response) {
         if (response == null) return null;
         if (response instanceof String) {
@@ -13537,10 +13588,8 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
             java.lang.reflect.Field bf = r92.getClass().getDeclaredField("b"); // i91
             bf.setAccessible(true);
             Object i91 = bf.get(r92);
-            Object jb1 = HostCompat.load(cl, "jb1")
-                    .getConstructor(String.class).newInstance(sid);
             Method delM = null;
-            for (Method m : i91.getClass().getDeclaredMethods()) {
+            for (Method m : allDeclaredMethods(i91.getClass())) {
                 if (m.getName().equals(HostCompat.method("i91", "c"))
                         && m.getParameterTypes().length == 2) {
                     delM = m;
@@ -13548,6 +13597,16 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
                 }
             }
             if (delM == null) { extLog("[RELAY] i91.c(delete) 未找到"); return false; }
+            // The endpoint's own first parameter is the request class. The table entry for it has
+            // no (String) constructor on every host, which is why throwaway sessions were never
+            // deleted and piled up in the account's conversation list.
+            Class<?> deleteRequestType = delM.getParameterTypes()[0];
+            Object jb1 = newSessionDeleteRequest(deleteRequestType, sid);
+            if (jb1 == null) {
+                extLog("[RELAY] i91.c(delete) unsupported request class "
+                        + deleteRequestType.getName());
+                return false;
+            }
             Object response = driveSuspend(cl, delM, i91, new Object[]{ jb1 });
             Object bodyValue = fieldByName(response, "j");
             if (!(bodyValue instanceof String)) return response != null;
@@ -13573,39 +13632,57 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
     }
 
     private volatile Method cachedRunBlocking;
-    private Object driveSuspend(ClassLoader cl, final Method m, final Object target, final Object[] preArgs) throws Throwable {
-        Class<?> n02 = HostCompat.load(cl, "n02");
-        Class<?> mb3 = HostCompat.load(cl, "mb3");
-        // runBlocking(CoroutineContext, Function2)=静态 (n02,mb3)->Object。
-        // build 间该 holder 类改名(2.2.1=t82 / 2.2.2=u82)，按候选名 + 结构签名兜底解析。
-        Method K = cachedRunBlocking;
-        if (K == null) {
-            // Kotlin's runBlocking(CoroutineContext, Function2) lives in a holder class whose name
-            // changes per R8 generation, so resolve it by shape instead of by name.
-            K = StructuralResolver.find(cl, new Class<?>[]{n02, mb3},
-                    StructuralResolver.staticReturningObject(), "runBlocking holder");
-            if (K != null) cachedRunBlocking = K;
-        }
-        if (K == null) { extLog("[VP] runBlocking(n02,mb3) not found"); return null; }
-        K.setAccessible(true);
+    /**
+     * Invokes a host suspend function from Java without Kotlin's runBlocking.
+     *
+     * <p>The holder class of {@code runBlocking(CoroutineContext, Function2)} is renamed by R8 and
+     * the mainland and Google Play builds do not share a name for it, which is why the previous
+     * name and shape search failed on Play. A suspend function already carries its continuation
+     * interface as its last parameter, so the call can be driven directly: resume a proxy
+     * continuation into a latch and wait for it. No coroutines class name is involved.</p>
+     */
+    private Object driveSuspend(ClassLoader cl, final Method m, final Object target,
+                                final Object[] preArgs) throws Throwable {
+        final Class<?>[] types = m.getParameterTypes();
         m.setAccessible(true);
-        final Object ctx = emptyContextProxy(cl, n02);
-        InvocationHandler blockH = new InvocationHandler() {
-            public Object invoke(Object proxy, Method mm, Object[] a) throws Throwable {
-                if (isObjectMethod(mm)) return objectMethod(proxy, mm, a);
-                Object cont = (a != null && a.length > 0) ? a[a.length - 1] : null;
-                Object[] args = new Object[preArgs.length + 1];
-                System.arraycopy(preArgs, 0, args, 0, preArgs.length);
-                args[preArgs.length] = cont;
-                try {
-                    return m.invoke(target, args);
-                } catch (java.lang.reflect.InvocationTargetException ite) {
-                    throw (ite.getCause() != null ? ite.getCause() : ite);
-                }
+        if (types.length == 0 || !types[types.length - 1].isInterface()) {
+            Object[] plain = new Object[preArgs.length];
+            System.arraycopy(preArgs, 0, plain, 0, preArgs.length);
+            try {
+                return m.invoke(target, plain);
+            } catch (java.lang.reflect.InvocationTargetException ite) {
+                throw (ite.getCause() != null ? ite.getCause() : ite);
             }
-        };
-        Object block = Proxy.newProxyInstance(cl, new Class<?>[]{mb3}, blockH);
-        return K.invoke(null, ctx, block);
+        }
+        final Class<?> continuationType = types[types.length - 1];
+        final CountDownLatch latch = new CountDownLatch(1);
+        final Object[] slot = new Object[1];
+        Object continuation = Proxy.newProxyInstance(cl, new Class<?>[]{continuationType},
+                new InvocationHandler() {
+                    @Override public Object invoke(Object proxy, Method method, Object[] a) {
+                        if (isObjectMethod(method)) return objectMethod(proxy, method, a);
+                        if (method.getParameterTypes().length == 0) {
+                            // getContext() must yield a CoroutineContext, not null.
+                            Class<?> rt = method.getReturnType();
+                            return rt.isInterface() ? emptyContextProxy(cl, rt) : null;
+                        }
+                        if (a != null && a.length > 0) slot[0] = a[0];
+                        latch.countDown();
+                        return null;
+                    }
+                });
+        Object[] args = new Object[preArgs.length + 1];
+        System.arraycopy(preArgs, 0, args, 0, preArgs.length);
+        args[preArgs.length] = continuation;
+        Object result;
+        try {
+            result = m.invoke(target, args);
+        } catch (java.lang.reflect.InvocationTargetException ite) {
+            throw (ite.getCause() != null ? ite.getCause() : ite);
+        }
+        if (latch.getCount() == 0) return slot[0];
+        if (latch.await(30, TimeUnit.SECONDS)) return slot[0];
+        return result;
     }
 
     private Object shallowCloneEw0(Object src) {
