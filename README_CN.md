@@ -14,6 +14,8 @@
 | 改动 | 说明 |
 |---|---|
 | **开源的本地 API** | 上游把本地 API 放在闭源 Closed 版里，以服务器密钥加密的 payload 下发。本 fork 用纯 Java 源码实现同等能力：在 DeepSeek 进程内提供 OpenAI / Anthropic 兼容的 HTTP 接口，复用宿主自己的鉴权传输与 PoW，不经过任何第三方。→ [docs/LOCAL-API.md](docs/LOCAL-API.md) |
+| **DexKit 宿主自适应** | 宿主符号改为结构化定位，不再依赖按渠道硬编码的 R8 名字表，因此 DeepSeek 更新后无需等模块发版。已在国行 2.3.6、Google Play 2.3.6/2.3.4、以及名字表完全不支持的 2.5.2 上验证。→ [docs/HOST-ADAPTATION.md](docs/HOST-ADAPTATION.md) |
+| **灰度功能自动检测** | 灰度管理器不再只显示固定 11 项：改为「人工精选项 ∪ 当前宿主 dex 里全部 `kv_remote_settings_*` 键」（国行 2.3.6 实测 147 项，其中 136 项为自动发现）。→ [docs/HOST-ADAPTATION.md](docs/HOST-ADAPTATION.md) |
 | **Windows 宿主构建** | 修掉编码、`d8` argv 超长、classpath 转换、`renameTo` 语义等平台问题，使 `scripts/build-all.sh` 与全部回归测试可在 Git Bash / MSYS2 下通过。→ [docs/BUILDING-WINDOWS.md](docs/BUILDING-WINDOWS.md) |
 | **可用的 CI** | 上游 workflow 每次必挂：`android-actions/setup-android` 会去装早已下架的 `tools` 包，`sdkmanager` 直接退出 1。改为直接安装 SDK，本 fork 的 Action 已跑绿。 |
 | **构建健壮性** | `scripts/androidx-path-parser.sh` 现在校验固定 AAR 的摘要，下载被截断时直接报错，而不是拿空的 `classes.jar` 继续编译。 |

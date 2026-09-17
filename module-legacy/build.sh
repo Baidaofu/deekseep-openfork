@@ -4,10 +4,14 @@ cd "$(dirname "$0")"
 
 source ../scripts/android-tools.sh
 source ../scripts/androidx-path-parser.sh
+source ../scripts/dexkit-deps.sh
 OUT=build
 rm -rf "$OUT"
 mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/generated-src/com/dsmod/probe"
 ANDROIDX_PATH_PARSER_JAR="$(prepare_androidx_path_parser "$OUT")"
+# DexKit lets the module resolve host symbols structurally instead of trusting only the
+# hard-coded R8 name table, so one build can follow a host update across channels.
+DEXKIT_JARS="$(prepare_dexkit_deps "$OUT")"
 
 cat > "$OUT/generated-src/com/dsmod/probe/BuildInfo.java" <<EOF
 package com.dsmod.probe;
@@ -36,14 +40,16 @@ find src/de -name '*.java' >> "$OUT/sources.txt"
 find "$OUT/generated-src" -name '*.java' >> "$OUT/sources.txt"
 
 if ! javac -encoding UTF-8 -source 8 -target 8 \
-    -cp "$(android_cp_normalize "$ANDROID_JAR:$ANDROIDX_PATH_PARSER_JAR")" \
+    -cp "$(android_cp_normalize "$ANDROID_JAR:$ANDROIDX_PATH_PARSER_JAR:$DEXKIT_JARS")" \
     -d "$OUT/classes" @"$OUT/sources.txt" 2> "$OUT/javac.err"; then
   cat "$OUT/javac.err"
   exit 1
 fi
 # D8 accepts an @argfile; keep argv short (Windows CreateProcess limit).
 find "$OUT/classes/com/dsmod" -name '*.class' > "$OUT/d8-inputs.txt"
-if command -v cygpath >/dev/null 2>&1; then cygpath -w "$ANDROIDX_PATH_PARSER_JAR" >> "$OUT/d8-inputs.txt"; else echo "$ANDROIDX_PATH_PARSER_JAR" >> "$OUT/d8-inputs.txt"; fi
+for dep in "$ANDROIDX_PATH_PARSER_JAR" $(printf '%s\n' "$DEXKIT_JARS" | tr ':' ' '); do
+  if command -v cygpath >/dev/null 2>&1; then cygpath -w "$dep" >> "$OUT/d8-inputs.txt"; else echo "$dep" >> "$OUT/d8-inputs.txt"; fi
+done
 $D8 --min-api 24 --output "$OUT/dex" @"$OUT/d8-inputs.txt" --lib "$ANDROID_JAR"
 $AAPT2 compile --dir res -o "$OUT/res.zip"
 $AAPT2 link -o "$OUT/base.apk" -I "$ANDROID_JAR" \
@@ -53,6 +59,8 @@ cp "$OUT/base.apk" "$OUT/unsigned.apk"
 mkdir -p "$OUT/xstage/assets"
 cp assets/xposed_init "$OUT/xstage/assets/xposed_init"
 ( cd "$OUT/xstage" && zip -q -9 -r ../unsigned.apk assets )
+cp -r "$OUT/lib" "$OUT/xstage/lib"
+( cd "$OUT/xstage" && zip -q -0 -r ../unsigned.apk lib )
 $ZIPALIGN -f -p 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
 if [ ! -f legacy.keystore ]; then
   keytool -genkeypair -keystore legacy.keystore -storepass deekseep \

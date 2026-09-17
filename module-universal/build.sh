@@ -4,6 +4,7 @@ cd "$(dirname "$0")"
 
 source ../scripts/android-tools.sh
 source ../scripts/androidx-path-parser.sh
+source ../scripts/dexkit-deps.sh
 RISH_DEX="../third_party/shizuku/rish_shizuku.dex"
 RISH_SHA256="1953c1fd9708904f8fc1f67774843b4cc3d03e5f2a578ff4d654d0625456bc28"
 GOOGLE_PLAY_BUILD="${GOOGLE_PLAY_BUILD:-false}"
@@ -32,6 +33,9 @@ fi
 rm -rf "$OUT"
 mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/generated-src/com/dsmod/probe"
 ANDROIDX_PATH_PARSER_JAR="$(prepare_androidx_path_parser "$OUT")"
+# DexKit lets the module resolve host symbols structurally instead of trusting only the
+# hard-coded R8 name table, so one build can follow a host update across channels.
+DEXKIT_JARS="$(prepare_dexkit_deps "$OUT")"
 
 echo "[0/7] generate BuildInfo.java"
 MODULE_VER=$(grep -oE 'android:versionName="[^"]+"' AndroidManifest.xml \
@@ -66,7 +70,7 @@ find "$OUT/generated-src" -name '*.java' >> "$OUT/sources.txt"
 
 echo "[2/7] javac"
 if ! javac -encoding UTF-8 -source 8 -target 8 \
-    -cp "$(android_cp_normalize "$ANDROID_JAR:$ANDROIDX_PATH_PARSER_JAR")" \
+    -cp "$(android_cp_normalize "$ANDROID_JAR:$ANDROIDX_PATH_PARSER_JAR:$DEXKIT_JARS")" \
     -d "$OUT/classes" @"$OUT/sources.txt" 2> "$OUT/javac.err"; then
   cat "$OUT/javac.err"
   exit 1
@@ -76,7 +80,9 @@ grep -v 'warning:' "$OUT/javac.err" || true
 echo "[3/7] d8"
 # D8 accepts an @argfile; keep argv short (Windows CreateProcess limit).
 find "$OUT/classes/com/dsmod" -name '*.class' > "$OUT/d8-inputs.txt"
-if command -v cygpath >/dev/null 2>&1; then cygpath -w "$ANDROIDX_PATH_PARSER_JAR" >> "$OUT/d8-inputs.txt"; else echo "$ANDROIDX_PATH_PARSER_JAR" >> "$OUT/d8-inputs.txt"; fi
+for dep in "$ANDROIDX_PATH_PARSER_JAR" $(printf '%s\n' "$DEXKIT_JARS" | tr ':' ' '); do
+  if command -v cygpath >/dev/null 2>&1; then cygpath -w "$dep" >> "$OUT/d8-inputs.txt"; else echo "$dep" >> "$OUT/d8-inputs.txt"; fi
+done
 $D8 --min-api 24 --output "$OUT/dex" @"$OUT/d8-inputs.txt" --lib "$ANDROID_JAR"
 
 echo "[4/7] aapt2"
@@ -92,6 +98,8 @@ cp assets/xposed_init "$OUT/xstage/assets/xposed_init"
 cp "$RISH_DEX" \
   "$OUT/xstage/META-INF/com.dsmod.probe.agent/.rish_shizuku_runtime_payload.dat"
 ( cd "$OUT/xstage" && zip -q -9 -r ../unsigned.apk META-INF assets )
+cp -r "$OUT/lib" "$OUT/xstage/lib"
+( cd "$OUT/xstage" && zip -q -0 -r ../unsigned.apk lib )
 
 echo "[6/7] zipalign"
 $ZIPALIGN -f -p 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"

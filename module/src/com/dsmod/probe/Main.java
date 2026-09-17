@@ -853,6 +853,7 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
                         if (isDataOptOutEnforced()) requestTrainingOptOut(act, false);
                         maybeInstallAdaptedSettingsEntry(act, cl);
                         LocalApi.onHostResumed(act);
+                        startHostSymbolResolution(act);
                         String languageState = "mode=" + UiLanguage.currentMode(act)
                                 + ", host=" + UiLanguage.detectedLanguage(act)
                                 + ", effective=" + (UiLanguage.isChinese(act)
@@ -12145,6 +12146,101 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
         }
     }
 
+    /** Host class loader for callers that need to load a DexKit-resolved symbol. */
+    static ClassLoader currentHostClassLoader() {
+        return hostClassLoader;
+    }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean HOST_SYMBOLS_STARTED =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /**
+     * Runs DexKit symbol resolution once per host version, off the main thread. The result is
+     * cached on disk, so later launches only read a small JSON file.
+     */
+    private static void startHostSymbolResolution(Context context) {
+        if (context == null) return;
+        if (!HOST_SYMBOLS_STARTED.compareAndSet(false, true)) return;
+        try {
+            android.content.pm.ApplicationInfo info = context.getApplicationInfo();
+            java.util.List<String> paths = new java.util.ArrayList<>();
+            if (info.sourceDir != null) paths.add(info.sourceDir);
+            if (info.splitSourceDirs != null) {
+                for (String split : info.splitSourceDirs) {
+                    if (split != null) paths.add(split);
+                }
+            }
+            int versionCode = -1;
+            try {
+                android.content.pm.PackageInfo packageInfo = context.getPackageManager()
+                        .getPackageInfo(context.getPackageName(), 0);
+                versionCode = HostSymbols.hostVersionCode(packageInfo);
+            } catch (Throwable ignored) {}
+            HostSymbols.initializeAsync(context.getApplicationContext(),
+                    paths.toArray(new String[0]), versionCode);
+            // The probe (marker file listing other channels' APKs) runs at the end of the same
+            // background thread, because DexKit keeps process-global dex state.
+            reportFeatureCatalog();
+        } catch (Throwable t) {
+            log("host symbols: start failed: " + safeThrowableMessage(t));
+        }
+    }
+
+    /**
+     * One-shot startup report for the rollout (gray) feature catalogue. Exercises both discovery
+     * sources on a real device: the host's own MMKV values and the key list compiled into its dex.
+     */
+    private static void reportFeatureCatalog() {
+        final ClassLoader loader = hostClassLoader;
+        if (loader == null) return;
+        try {
+            log("features: curated=" + RemoteFeatureFlags.FEATURES.length
+                    + " visible=" + RemoteFeatureFlags.visibleFeatures(loader).length
+                    + " discovered=" + RemoteFeatureFlags.discoveredCount(loader)
+                    + " overridable=" + RemoteFeatureFlags.overridableCount(loader));
+        } catch (Throwable t) {
+            log("features: summary failed: " + safeThrowableMessage(t));
+        }
+        try {
+            RemoteFeatureFlags.discoverAsync(loader, new Runnable() {
+                @Override public void run() {
+                    try {
+                        log("features: after dex scan visible="
+                                + RemoteFeatureFlags.visibleFeatures(loader).length
+                                + " discovered=" + RemoteFeatureFlags.discoveredCount(loader)
+                                + " overridable="
+                                + RemoteFeatureFlags.overridableCount(loader));
+                    } catch (Throwable ignored) {}
+                }
+            });
+        } catch (Throwable t) {
+            log("features: discovery failed: " + safeThrowableMessage(t));
+        }
+    }
+
+    /**
+     * The completion request body, located by DexKit when possible.
+     *
+     * <p>The R8 name table is per channel and generation, so it is the first thing to break after a
+     * DeepSeek update. {@link HostSymbols} anchors the class on its kotlinx.serialization name,
+     * which is part of the wire contract and survives obfuscation, and verifies the 11 parameter
+     * constructor before the result is used.</p>
+     */
+    private static Class<?> resolveCompletionRequestClass(ClassLoader cl)
+            throws ClassNotFoundException {
+        String resolved = HostSymbols.get(HostSymbols.COMPLETION_REQUEST);
+        if (resolved != null && resolved.length() > 0) {
+            try {
+                return Class.forName(resolved, true, cl);
+            } catch (Throwable t) {
+                extLog("[API] DexKit completion request " + resolved
+                        + " is not loadable, falling back to the symbol table: "
+                        + safeThrowableMessage(t));
+            }
+        }
+        return HostCompat.load(cl, "qw0");
+    }
+
     // ── Local API ────────────────────────────────────────────────────────
     // The gateway runs in this (DeepSeek) process so it reuses the host's own authenticated
     // transport, PoW manager and session store instead of the app-level HTTP client.
@@ -12229,7 +12325,7 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
      */
     private static Object newNativeCompletionRequest(ClassLoader cl, String sid, String prompt,
             List<String> fileIds, String nativeModel, Object proof) throws Throwable {
-        Class<?> requestClass = HostCompat.load(cl, "qw0");
+        Class<?> requestClass = resolveCompletionRequestClass(cl);
         Object template = liveRequestTemplate;
         Object request = null;
         if (template != null && requestClass.isInstance(template) && MODULE != null) {

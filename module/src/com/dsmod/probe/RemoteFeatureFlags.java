@@ -1,16 +1,25 @@
 package com.dsmod.probe;
 
+import android.content.Context;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
+import android.os.Build;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
+import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 
 /** Manages DeepSeek's native local overrides for verified boolean feature settings. */
 final class RemoteFeatureFlags {
@@ -22,6 +31,18 @@ final class RemoteFeatureFlags {
             "/data/data/com.deepseek.chat/files/deekseep_remote_feature_overrides.json";
     static final String ATTACHMENT_GUIDE_PROMPTS =
             "deekseep_model_config_attachment_guide_prompts";
+
+    /** Discovered rollout catalog; written once per host build. */
+    static final String CATALOG_FILE =
+            "/data/data/com.deepseek.chat/files/deekseep_feature_catalog.json";
+    private static final String DISCOVERED_PREFIX = "kv_remote_settings_";
+    private static final String TYPE_BOOLEAN = "boolean";
+    private static final String TYPE_INT = "int";
+    private static final String TYPE_LONG = "long";
+    private static final String TYPE_FLOAT = "float";
+    private static final String TYPE_STRING = "string";
+    private static final String TYPE_UNKNOWN = "unknown";
+    private static final String HOST_PACKAGE = "com.deepseek.chat";
 
     static final class Feature {
         final String key;
@@ -100,6 +121,17 @@ final class RemoteFeatureFlags {
     private static volatile boolean migrated;
     private static volatile int loadedFormatVersion;
 
+    /** Curated entries followed by every rollout key discovered in the installed host. */
+    private static volatile Feature[] visible = FEATURES;
+    private static volatile Map<String, String> discoveredTypes = Collections.emptyMap();
+    private static volatile Map<String, String> cachedCatalogTypes = Collections.emptyMap();
+    private static volatile int catalogVersionCode = -1;
+    private static volatile boolean catalogLoaded;
+    private static volatile int refreshedForVersionCode = -1;
+    private static volatile int cachedHostVersionCode = -1;
+    private static volatile Context cachedHostContext;
+    private static volatile boolean discoveryStarted;
+
     private RemoteFeatureFlags() {}
 
     private static Feature feature(String suffix, String zh, String en,
@@ -126,8 +158,332 @@ final class RemoteFeatureFlags {
     }
 
     static Feature featureForKey(String key) {
-        for (Feature feature : FEATURES) if (feature.key.equals(key)) return feature;
+        if (key == null) return null;
+        for (Feature feature : visible) if (feature.key.equals(key)) return feature;
         return null;
+    }
+
+    /** True for any key the module may hold an override for, curated or discovered. */
+    static boolean isFeatureKey(String key) {
+        if (featureForKey(key) != null) return true;
+        return isDiscoveredKey(key);
+    }
+
+    /** True when the host stores this key as a Boolean, so a forced value can be written. */
+    static boolean isBooleanKey(String key) {
+        Feature feature = featureForKey(key);
+        if (feature != null) return feature.nativeBoolean;
+        return TYPE_BOOLEAN.equals(discoveredTypes.get(key));
+    }
+
+    /**
+     * Curated entries first, then every {@code kv_remote_settings_*} key found in the installed
+     * DeepSeek build. Cheap after the first call: it merges the cached catalog with the live MMKV
+     * keys and never scans the dex itself.
+     */
+    static Feature[] visibleFeatures(ClassLoader loader) {
+        ensureCatalog(loader);
+        return visible;
+    }
+
+    /** Number of rollout keys discovered beyond the curated list. */
+    static int discoveredCount(ClassLoader loader) {
+        ensureCatalog(loader);
+        return Math.max(0, visible.length - FEATURES.length);
+    }
+
+    /** Number of entries the user can actually force on or off. */
+    static int overridableCount(ClassLoader loader) {
+        int count = 0;
+        for (Feature feature : visibleFeatures(loader)) {
+            if (isOverridable(feature)) count++;
+        }
+        return count;
+    }
+
+    /**
+     * Scans the host dex for rollout keys the server has not pushed yet. This is the expensive
+     * step, so it runs on a daemon thread and only once per process; {@code onUpdated} is invoked
+     * from that background thread when the visible list grew.
+     */
+    static void discoverAsync(final ClassLoader loader, final Runnable onUpdated) {
+        if (discoveryStarted) return;
+        discoveryStarted = true;
+        Thread thread = new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    if (refreshCatalog(loader, true) && onUpdated != null) onUpdated.run();
+                } catch (Throwable error) {
+                    Main.log("feature rollout discovery failed: " + error);
+                }
+            }
+        }, "Deekseep-feature-discovery");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    /** Rebuilds the visible list from the cache plus live MMKV; scans the dex only when allowed. */
+    private static void ensureCatalog(ClassLoader loader) {
+        int versionCode = hostVersionCode();
+        if (versionCode > 0 && refreshedForVersionCode == versionCode) return;
+        synchronized (LOCK) {
+            if (versionCode > 0 && refreshedForVersionCode == versionCode) return;
+            refreshCatalog(loader, false);
+        }
+    }
+
+    private static boolean refreshCatalog(ClassLoader loader, boolean allowDexScan) {
+        int versionCode = hostVersionCode();
+        if (!catalogLoaded && versionCode > 0) {
+            catalogLoaded = true;
+            loadCatalog(versionCode);
+        }
+        LinkedHashMap<String, String> types = new LinkedHashMap<String, String>();
+        boolean needDexScan = !(versionCode > 0 && versionCode == catalogVersionCode
+                && !cachedCatalogTypes.isEmpty());
+        if (!needDexScan) types.putAll(cachedCatalogTypes);
+
+        boolean allowed = needDexScan && allowDexScan;
+        if (allowed) {
+            Set<String> fromDex = HostDexStrings.stringsWithPrefix(
+                    hostSourceDir(), hostSplitSourceDirs(), DISCOVERED_PREFIX);
+            for (String key : fromDex) {
+                if (!types.containsKey(key)) types.put(key, TYPE_UNKNOWN);
+            }
+        }
+
+        // Typing runs after the key list exists: MMKV refuses getAll() ("type-erasure inside
+        // mmkv") and this host build has no public allKeys() left after R8, so the list comes from
+        // the dex and each stored key is probed with the typed getters, which validate the type in
+        // native code.
+        SharedPreferences preferences = AccountManager.defaultMmkv(loader);
+        if (preferences != null) {
+            int probed = 0;
+            int booleans = 0;
+            for (String key : new ArrayList<String>(types.keySet())) {
+                try {
+                    if (!preferences.contains(key)) continue;
+                } catch (Throwable ignored) {
+                    continue;
+                }
+                String type = typeOfKey(preferences, key);
+                types.put(key, type);
+                probed++;
+                if (TYPE_BOOLEAN.equals(type)) booleans++;
+            }
+            if (probed > 8 && booleans == probed) {
+                // Every stored key resolved to the same type, which means the getters are lenient
+                // and reported the default instead of validating the stored tag. Do not offer
+                // write access on a guess: discovered entries stay read-only.
+                for (String key : new ArrayList<String>(types.keySet())) {
+                    if (!isCuratedKey(key)) types.put(key, TYPE_UNKNOWN);
+                }
+                Main.log("feature rollout: probed=" + probed
+                        + " keys all reported the same type; the host MMKV getters do not"
+                        + " validate types, so discovered entries stay read-only");
+            } else {
+                Main.log("feature rollout: probed=" + probed + " boolean=" + booleans
+                        + " keys=" + types.size());
+            }
+        }
+
+        if (allowed && versionCode > 0) {
+            cachedCatalogTypes = Collections.unmodifiableMap(
+                    new LinkedHashMap<String, String>(types));
+            catalogVersionCode = versionCode;
+            saveCatalog(versionCode, types);
+        }
+
+        // Latch only when the live source was readable; otherwise a call that ran before MMKV
+        // was initialised would pin an empty catalog for the rest of the process.
+        if (versionCode > 0 && preferences != null) refreshedForVersionCode = versionCode;
+        if (types.equals(discoveredTypes)) return false;
+        discoveredTypes = Collections.unmodifiableMap(types);
+        visible = buildVisible(types);
+        return true;
+    }
+
+    private static Feature[] buildVisible(Map<String, String> types) {
+        ArrayList<Feature> list = new ArrayList<Feature>(FEATURES.length + types.size());
+        HashSet<String> curated = new HashSet<String>();
+        for (Feature feature : FEATURES) {
+            list.add(feature);
+            curated.add(feature.key);
+        }
+        ArrayList<String> discovered = new ArrayList<String>();
+        for (String key : types.keySet()) {
+            if (!curated.contains(key)) discovered.add(key);
+        }
+        Collections.sort(discovered);
+        for (String key : discovered) {
+            String label = key.substring(DISCOVERED_PREFIX.length());
+            boolean overridable = TYPE_BOOLEAN.equals(types.get(key));
+            // Discovered entries carry no module-written description, so they show the key.
+            list.add(new Feature(key, label, label, key, key, false, overridable));
+        }
+        return list.toArray(new Feature[list.size()]);
+    }
+
+    private static boolean isDiscoveredKey(String key) {
+        return key != null && key.startsWith(DISCOVERED_PREFIX)
+                && key.length() > DISCOVERED_PREFIX.length();
+    }
+
+    /**
+     * MMKV's typed getters validate the stored type in native code, so the first getter that does
+     * not throw identifies the type. Anything ambiguous stays UNKNOWN and therefore read-only.
+     */
+    private static String typeOfKey(SharedPreferences preferences, String key) {
+        // MMKV's SharedPreferences getBoolean() is lenient: it never throws on a type mismatch.
+        // decodeString() does validate the stored type tag, so strings are probed first and the
+        // numeric getters after; a key that survives none of them stays UNKNOWN (read-only).
+        try { preferences.getString(key, null); return TYPE_STRING; } catch (Throwable ignored) {}
+        try { preferences.getInt(key, 0); return TYPE_INT; } catch (Throwable ignored) {}
+        try { preferences.getLong(key, 0L); return TYPE_LONG; } catch (Throwable ignored) {}
+        try { preferences.getFloat(key, 0.0f); return TYPE_FLOAT; } catch (Throwable ignored) {}
+        try { preferences.getBoolean(key, false); return TYPE_BOOLEAN; } catch (Throwable ignored) {}
+        return TYPE_UNKNOWN;
+    }
+
+    private static boolean isCuratedKey(String key) {
+        for (Feature feature : FEATURES) {
+            if (feature.key.equals(key)) return true;
+        }
+        return false;
+    }
+
+    private static String typeOf(Object value) {
+        if (value instanceof Boolean) return TYPE_BOOLEAN;
+        if (value instanceof Integer) return TYPE_INT;
+        if (value instanceof Long) return TYPE_LONG;
+        if (value instanceof Float) return TYPE_FLOAT;
+        if (value instanceof String) return TYPE_STRING;
+        return TYPE_UNKNOWN;
+    }
+
+    private static int hostVersionCode() {
+        int cached = cachedHostVersionCode;
+        if (cached > 0) return cached;
+        int looked = lookupHostVersionCode();
+        if (looked > 0) cachedHostVersionCode = looked;
+        return looked;
+    }
+
+    private static int lookupHostVersionCode() {
+        Context context = hostContext();
+        if (context == null) return -1;
+        try {
+            PackageInfo info = context.getPackageManager().getPackageInfo(HOST_PACKAGE, 0);
+            if (info == null) return -1;
+            if (Build.VERSION.SDK_INT >= 28) return (int) info.getLongVersionCode();
+            return info.versionCode;
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    /**
+     * The listener runs inside the DeepSeek process, so its own Application is the host one. Main
+     * keeps a private reference as well; both are tried so ordering does not matter.
+     */
+    private static Context hostContext() {
+        Context context = cachedHostContext;
+        if (context != null) return context;
+        Context found = null;
+        // Main assigns this before it calls enforce(), so it is the reliable source. The
+        // ActivityThread accessor is only a fallback because hidden-API enforcement may refuse it.
+        try {
+            Field field = Main.class.getDeclaredField("hostApplicationContext");
+            field.setAccessible(true);
+            Object value = field.get(null);
+            if (value instanceof Context) found = (Context) value;
+        } catch (Throwable ignored) {
+        }
+        if (found == null) {
+            try {
+                Object application = Class.forName("android.app.ActivityThread")
+                        .getMethod("currentApplication").invoke(null);
+                if (application instanceof Context) found = (Context) application;
+            } catch (Throwable ignored) {
+            }
+        }
+        if (found != null) cachedHostContext = found;
+        return found;
+    }
+
+    private static String hostSourceDir() {
+        Context context = hostContext();
+        return context == null ? null : context.getApplicationInfo().sourceDir;
+    }
+
+    private static String[] hostSplitSourceDirs() {
+        Context context = hostContext();
+        return context == null ? null : context.getApplicationInfo().splitSourceDirs;
+    }
+
+    private static void loadCatalog(int versionCode) {
+        File file = new File(CATALOG_FILE);
+        if (!file.isFile() || file.length() <= 0 || file.length() > 256 * 1024L) return;
+        FileReader reader = null;
+        try {
+            reader = new FileReader(file);
+            StringBuilder json = new StringBuilder((int) file.length());
+            char[] buffer = new char[4096];
+            int count;
+            while ((count = reader.read(buffer)) >= 0) {
+                if (count > 0) json.append(buffer, 0, count);
+            }
+            JSONObject root = new JSONObject(json.toString());
+            if (root.optInt("versionCode", -1) != versionCode) return;
+            JSONObject typeMap = root.optJSONObject("types");
+            LinkedHashMap<String, String> types = new LinkedHashMap<String, String>();
+            if (typeMap != null) {
+                Iterator<String> keys = typeMap.keys();
+                while (keys.hasNext()) {
+                    String key = keys.next();
+                    if (isDiscoveredKey(key)) {
+                        types.put(key, typeMap.optString(key, TYPE_UNKNOWN));
+                    }
+                }
+            }
+            cachedCatalogTypes = Collections.unmodifiableMap(types);
+            catalogVersionCode = versionCode;
+        } catch (Throwable ignored) {
+        } finally {
+            if (reader != null) try { reader.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    private static void saveCatalog(int versionCode, Map<String, String> types) {
+        File target = new File(CATALOG_FILE);
+        File parent = target.getParentFile();
+        if (parent != null && !parent.isDirectory() && !parent.mkdirs()) return;
+        File temp = new File(CATALOG_FILE + ".tmp");
+        FileWriter writer = null;
+        try {
+            JSONObject root = new JSONObject();
+            root.put("format", "deekseep-feature-catalog");
+            root.put("versionCode", versionCode);
+            JSONArray keys = new JSONArray();
+            JSONObject typeMap = new JSONObject();
+            for (Map.Entry<String, String> entry : types.entrySet()) {
+                keys.put(entry.getKey());
+                typeMap.put(entry.getKey(), entry.getValue());
+            }
+            root.put("keys", keys);
+            root.put("types", typeMap);
+            writer = new FileWriter(temp, false);
+            writer.write(root.toString());
+            writer.flush();
+            writer.close();
+            writer = null;
+            if (target.exists() && !target.delete()) return;
+            temp.renameTo(target);
+        } catch (Throwable ignored) {
+        } finally {
+            if (writer != null) try { writer.close(); } catch (Throwable ignored) {}
+            if (temp.exists()) try { temp.delete(); } catch (Throwable ignored) {}
+        }
     }
 
     private static boolean wasManagedByVersion1(String key) {
@@ -137,7 +493,13 @@ final class RemoteFeatureFlags {
                 || "kv_remote_settings_sse_auto_scroll_one_screen".equals(key);
     }
 
+    /** Any entry with a usable key is listed, including read-only discovered rollouts. */
     static boolean isSupported(Feature feature) {
+        return feature != null && feature.key != null && feature.key.length() > 0;
+    }
+
+    /** Only Boolean rollouts (and the 2.3.4 model-config entry) can be forced. */
+    static boolean isOverridable(Feature feature) {
         return feature != null && (feature.nativeBoolean
                 || (ATTACHMENT_GUIDE_PROMPTS.equals(feature.key) && HostCompat.isV234()));
     }
@@ -197,7 +559,7 @@ final class RemoteFeatureFlags {
 
     static boolean setMode(ClassLoader loader, String key, int wanted) {
         Feature feature = featureForKey(key);
-        if (feature == null || !isSupported(feature)
+        if (feature == null || !isOverridable(feature)
                 || (wanted != FORCE_OFF && wanted != FOLLOW && wanted != FORCE_ON)) return false;
         SharedPreferences preferences = AccountManager.defaultMmkv(loader);
         if (feature.nativeBoolean && preferences == null) return false;
@@ -233,7 +595,7 @@ final class RemoteFeatureFlags {
             if (!saveLocked(Collections.<String, Integer>emptyMap())) return false;
             try {
                 SharedPreferences.Editor editor = preferences.edit();
-                for (Feature feature : FEATURES) {
+                for (Feature feature : visibleFeatures(loader)) {
                     if (feature.nativeBoolean) editor.remove(localKey(feature.key));
                 }
                 if (!editor.commit()) return false;
@@ -253,8 +615,8 @@ final class RemoteFeatureFlags {
 
     static int overriddenCount(ClassLoader loader) {
         int count = 0;
-        for (Feature feature : FEATURES) {
-            if (isSupported(feature) && mode(loader, feature.key) != FOLLOW) count++;
+        for (Feature feature : visibleFeatures(loader)) {
+            if (isOverridable(feature) && mode(loader, feature.key) != FOLLOW) count++;
         }
         return count;
     }
@@ -306,7 +668,9 @@ final class RemoteFeatureFlags {
 
             // Preserve overrides made by DeepSeek's own hidden settings UI when adopting v2.
             HashMap<String, Integer> adopted = new HashMap<>(modes);
-            for (Feature feature : FEATURES) {
+            HashMap<String, Feature> known = new HashMap<String, Feature>();
+            for (Feature feature : visibleFeatures(loader)) known.put(feature.key, feature);
+            for (Feature feature : visibleFeatures(loader)) {
                 if (!feature.nativeBoolean) continue;
                 String local = localKey(feature.key);
                 if (!adopted.containsKey(feature.key) && preferences.contains(local)) {
@@ -316,16 +680,16 @@ final class RemoteFeatureFlags {
             }
             modes = Collections.unmodifiableMap(adopted);
             for (Map.Entry<String, Integer> entry : adopted.entrySet()) {
-                Feature feature = featureForKey(entry.getKey());
-                if (feature != null && feature.nativeBoolean && isSupported(feature)) {
+                Feature feature = known.get(entry.getKey());
+                if (feature != null && feature.nativeBoolean && isOverridable(feature)) {
                     editor.putBoolean(localKey(entry.getKey()),
                             hostValue(feature, entry.getValue() == FORCE_ON));
                 }
             }
             if (!editor.commit()) return false;
             for (Map.Entry<String, Integer> entry : adopted.entrySet()) {
-                Feature feature = featureForKey(entry.getKey());
-                if (feature != null && feature.nativeBoolean && isSupported(feature)) {
+                Feature feature = known.get(entry.getKey());
+                if (feature != null && feature.nativeBoolean && isOverridable(feature)) {
                     boolean user = entry.getValue() == FORCE_ON;
                     Main.log("native feature override applied key=" + entry.getKey()
                             + " user=" + user + " host=" + hostValue(feature, user));
@@ -344,9 +708,11 @@ final class RemoteFeatureFlags {
         if (preferences == null) return false;
         try {
             SharedPreferences.Editor editor = preferences.edit();
+            HashMap<String, Feature> known = new HashMap<String, Feature>();
+            for (Feature feature : visibleFeatures(loader)) known.put(feature.key, feature);
             for (Map.Entry<String, Integer> entry : modes.entrySet()) {
-                Feature feature = featureForKey(entry.getKey());
-                if (feature != null && feature.nativeBoolean && isSupported(feature)) {
+                Feature feature = known.get(entry.getKey());
+                if (feature != null && feature.nativeBoolean && isOverridable(feature)) {
                     editor.putBoolean(localKey(entry.getKey()),
                             hostValue(feature, entry.getValue() == FORCE_ON));
                 }
@@ -388,7 +754,7 @@ final class RemoteFeatureFlags {
                     while (keys.hasNext()) {
                         String key = keys.next();
                         int value = overrides.optInt(key, FOLLOW);
-                        if (featureForKey(key) != null && value != FOLLOW) {
+                        if (isFeatureKey(key) && value != FOLLOW) {
                             loadedModes.put(key, value > 0 ? FORCE_ON : FORCE_OFF);
                         }
                     }
@@ -430,7 +796,7 @@ final class RemoteFeatureFlags {
             root.put("version", 4);
             JSONObject overrides = new JSONObject();
             for (Map.Entry<String, Integer> entry : nextModes.entrySet()) {
-                if (featureForKey(entry.getKey()) != null && entry.getValue() != FOLLOW) {
+                if (isFeatureKey(entry.getKey()) && entry.getValue() != FOLLOW) {
                     overrides.put(entry.getKey(), entry.getValue().intValue());
                 }
             }

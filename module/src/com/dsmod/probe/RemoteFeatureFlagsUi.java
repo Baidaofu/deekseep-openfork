@@ -102,6 +102,13 @@ final class RemoteFeatureFlagsUi {
         note.setPadding(dp(activity, 4), 0, dp(activity, 4), dp(activity, 14));
         content.addView(note);
 
+        final TextView summary = new TextView(activity);
+        summary.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        summary.setTextColor(secondary);
+        summary.setLineSpacing(dp(activity, 1), 1f);
+        summary.setPadding(dp(activity, 4), 0, dp(activity, 4), dp(activity, 10));
+        content.addView(summary);
+
         final LinearLayout featureCard = new LinearLayout(activity);
         featureCard.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable cardBackground = new GradientDrawable();
@@ -111,12 +118,37 @@ final class RemoteFeatureFlagsUi {
         content.addView(featureCard, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        int displayed = 0;
-        for (RemoteFeatureFlags.Feature feature : RemoteFeatureFlags.FEATURES) {
-            if (!RemoteFeatureFlags.isSupported(feature)) continue;
-            if (displayed++ > 0) featureCard.addView(divider(activity, divider));
-            addFeatureRow(activity, featureCard, feature, text, secondary, dark);
-        }
+        // The curated list renders immediately; the dex scan only adds rollout keys the server
+        // has not pushed yet, so it runs in the background and repaints when it finds something.
+        final int dividerColor = divider;
+        final Runnable[] render = new Runnable[1];
+        render[0] = new Runnable() {
+            @Override public void run() {
+                if (activity.isFinishing()) return;
+                featureCard.removeAllViews();
+                RemoteFeatureFlags.Feature[] features =
+                        RemoteFeatureFlags.visibleFeatures(activity.getClassLoader());
+                int displayed = 0;
+                for (RemoteFeatureFlags.Feature feature : features) {
+                    if (!RemoteFeatureFlags.isSupported(feature)) continue;
+                    if (displayed++ > 0) {
+                        featureCard.addView(divider(activity, dividerColor));
+                    }
+                    addFeatureRow(activity, featureCard, feature, text, secondary, dark);
+                }
+                int forceable =
+                        RemoteFeatureFlags.overridableCount(activity.getClassLoader());
+                summary.setText(UiLanguage.text(activity,
+                        "已发现 " + displayed + " 项灰度，其中 " + forceable + " 项可强制",
+                        displayed + " rollouts discovered, " + forceable + " forceable"));
+            }
+        };
+        render[0].run();
+        RemoteFeatureFlags.discoverAsync(activity.getClassLoader(), new Runnable() {
+            @Override public void run() {
+                activity.runOnUiThread(render[0]);
+            }
+        });
 
         TextView reset = new TextView(activity);
         reset.setText(UiLanguage.text(activity,
@@ -203,15 +235,26 @@ final class RemoteFeatureFlagsUi {
         state.setGravity(Gravity.CENTER);
         state.setPadding(dp(activity, 8), dp(activity, 5),
                 dp(activity, 8), dp(activity, 5));
-        updateState(activity, state, feature.key, dark);
+        final boolean overridable = RemoteFeatureFlags.isOverridable(feature);
+        if (overridable) {
+            updateState(activity, state, feature.key, dark);
+        } else {
+            updateReadOnlyState(activity, state, secondary, dark);
+        }
         row.addView(state, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        row.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) {
-                showModePicker(activity, feature, state, dark);
-            }
-        });
+        if (overridable) {
+            row.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View view) {
+                    showModePicker(activity, feature, state, dark);
+                }
+            });
+        } else {
+            // Non-Boolean rollouts have no Boolean mirror to write, so they stay informational.
+            row.setClickable(false);
+            row.setFocusable(false);
+        }
         parent.addView(row, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
@@ -257,6 +300,16 @@ final class RemoteFeatureFlagsUi {
                 .setNegativeButton(UiLanguage.text(activity, "取消", "Cancel"), null)
                 .create();
         dialog.show();
+    }
+
+    private static void updateReadOnlyState(Activity activity, TextView view, int secondary,
+            boolean dark) {
+        view.setText(UiLanguage.text(activity, "只读", "Read-only"));
+        view.setTextColor(secondary);
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(dark ? 0xFF36363A : 0xFFF0F2F7);
+        background.setCornerRadius(dp(activity, 7));
+        view.setBackground(background);
     }
 
     private static void updateState(Activity activity, TextView view, String key, boolean dark) {

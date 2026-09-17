@@ -51,3 +51,6 @@ FIX_chat_editor_add_thinking.md
 # Local, Termux-compatible Claude Code runtime used by scripts/claude-deekseep
 .claude-code-termux/
 scripts/__pycache__/
+
+# Build-time dependency cache (DexKit, AndroidX)
+build-deps/
