@@ -11732,7 +11732,8 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
             @Override public Object intercept(Chain chain) throws Throwable {
                 Object[] args = chain.getArgs().toArray();
                 try { if (liveR92 == null) { liveR92 = chain.getThisObject();
-                    extLog("[API] transport captured via " + mDeclaration(chain)); } }
+                    extLog("[API] transport captured via " + mDeclaration(chain));
+                    installNativeBackend(); } }
                 catch (Throwable ignored) {}
                 try {
                     Object req = args != null && args.length > 0 ? args[0] : null;
@@ -12159,7 +12160,7 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
     /** Hands the Local API gateway a bridge onto the captured host transport + PoW manager. */
     private static void installNativeBackend() {
         try {
-            if (liveR92 != null && liveQ71 != null && hostApplicationContext != null) {
+            if (liveR92 != null && hostApplicationContext != null) {
                 LocalApi.setNativeBridge(new NativeBridge());
                 log("local api: native bridge installed");
             }
@@ -12273,7 +12274,7 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
             Main main = MODULE;
             ClassLoader cl = hostClassLoader;
             Object transport = liveR92;
-            if (main == null || cl == null || transport == null || liveQ71 == null) {
+            if (main == null || cl == null || transport == null) {
                 throw new IOException("host transport is not captured yet");
             }
             String sid = main.createThrowawaySession(cl, transport);
@@ -12288,14 +12289,26 @@ public class Main extends LegacyXposedModule implements IXposedHookLoadPackage {
             ClassLoader cl = hostClassLoader;
             Object transport = liveR92;
             Object powManager = liveQ71;
-            if (main == null || cl == null || transport == null || powManager == null) {
+            if (main == null || cl == null || transport == null) {
                 throw new IOException("host transport is not captured yet");
             }
-            Object proof;
-            try {
-                proof = main.mintCompletionPow(cl, powManager);
-            } catch (Throwable t) {
-                throw new IOException("proof of work minting failed: " + safeThrowableMessage(t));
+            Object proof = null;
+            if (powManager != null) {
+                try {
+                    proof = main.mintCompletionPow(cl, powManager);
+                } catch (Throwable t) {
+                    extLog("[API] pow minting threw: " + safeThrowableMessage(t));
+                }
+            }
+            if (!(proof instanceof String) || ((String) proof).length() == 0) {
+                // Some channels never expose the PoW manager to the module's hooks. The host
+                // mints a proof for every request it sends, so the most recent one is a usable
+                // fallback; if the server rejects a reused proof the call simply fails.
+                Object recent = fieldByName(liveRequestTemplate, "k");
+                if (recent instanceof String && ((String) recent).length() > 0) {
+                    proof = recent;
+                    extLog("[API] reusing the host's most recent proof of work");
+                }
             }
             if (!(proof instanceof String) || ((String) proof).length() == 0) {
                 throw new IOException("proof of work minting failed");
